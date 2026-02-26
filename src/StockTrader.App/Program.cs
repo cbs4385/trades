@@ -40,13 +40,14 @@ public class Program
         Console.WriteLine($"Capital:     {config.InitialCapital:C}");
         Console.WriteLine($"Commission:  {config.Commission:C} per trade");
         Console.WriteLine();
-        Console.WriteLine("Fetching market data from Yahoo Finance...");
-
         IMarketDataProvider dataProvider = config.DataSource switch
         {
+            "alphavantage" => new AlphaVantageProvider(config.AlphaVantageApiKey),
             "csv" => new CsvDataProvider(config.CsvDataPath),
             _ => new YahooFinanceProvider()
         };
+
+        Console.WriteLine($"Fetching market data via {config.DataSource}...");
 
         var quotes = await dataProvider.GetHistoricalDataAsync(
             config.Symbols, config.StartDate, config.EndDate);
@@ -123,6 +124,9 @@ public class Program
                 case "--csv-path":
                     config.CsvDataPath = args[++i];
                     break;
+                case "--api-key":
+                    config.AlphaVantageApiKey = args[++i];
+                    break;
                 case "--help" or "-h":
                     PrintHelp();
                     Environment.Exit(0);
@@ -149,13 +153,15 @@ public class Program
         Console.WriteLine("  --rsi-oversold <n>           RSI oversold threshold (default: 30)");
         Console.WriteLine("  --commission <amount>        Commission per trade (default: $0)");
         Console.WriteLine("  --max-position <pct>         Max position size as fraction (default: 0.25)");
-        Console.WriteLine("  --data-source <source>       Data source: yahoo, csv (default: yahoo)");
+        Console.WriteLine("  --data-source <source>       Data source: yahoo, alphavantage, csv (default: yahoo)");
+        Console.WriteLine("  --api-key <key>              Alpha Vantage API key (free at alphavantage.co)");
         Console.WriteLine("  --csv-path <path>            Path to CSV data directory");
         Console.WriteLine("  --help, -h                   Show this help message");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run -- --symbols AAPL,MSFT --capital 50000 --strategy sma-crossover");
         Console.WriteLine("  dotnet run -- --symbols TSLA --strategy rsi --rsi-oversold 25 --rsi-overbought 75");
+        Console.WriteLine("  dotnet run -- --data-source alphavantage --api-key YOUR_KEY --symbols AAPL");
     }
 }
 
@@ -174,4 +180,5 @@ public class SimulationConfig
     public decimal MaxPositionPercent { get; set; } = 0.25m;
     public string DataSource { get; set; } = "yahoo";
     public string CsvDataPath { get; set; } = "./data";
+    public string AlphaVantageApiKey { get; set; } = string.Empty;
 }

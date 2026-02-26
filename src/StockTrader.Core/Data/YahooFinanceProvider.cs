@@ -1,33 +1,61 @@
+using System.Net;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using StockTrader.Core.Models;
 
 namespace StockTrader.Core.Data;
 
 public class YahooFinanceProvider : IMarketDataProvider
 {
-    private static readonly HttpClient HttpClient;
     private const int MaxRetries = 3;
-    private const string BaseUrl = "https://query1.finance.yahoo.com/v8/finance/chart";
+
+    private static readonly CookieContainer CookieJar = new();
+    private static readonly HttpClient HttpClient;
+    private static string? _crumb;
+    private static readonly SemaphoreSlim CrumbLock = new(1, 1);
 
     static YahooFinanceProvider()
     {
-        var handler = new HttpClientHandler { AllowAutoRedirect = true };
+        var handler = new HttpClientHandler
+        {
+            AllowAutoRedirect = true,
+            CookieContainer = CookieJar,
+            UseCookies = true
+        };
         HttpClient = new HttpClient(handler);
         HttpClient.DefaultRequestHeaders.Add("User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-        HttpClient.DefaultRequestHeaders.Add("Accept", "application/json");
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+        HttpClient.DefaultRequestHeaders.Add("Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7");
     }
 
     public async Task<StockQuote> GetHistoricalDataAsync(string symbol, DateTime startDate, DateTime endDate)
     {
         var period1 = new DateTimeOffset(startDate).ToUnixTimeSeconds();
         var period2 = new DateTimeOffset(endDate).ToUnixTimeSeconds();
-        var url = $"{BaseUrl}/{symbol}?period1={period1}&period2={period2}&interval=1d&includeAdjustedClose=true";
 
-        string json = await FetchWithRetryAsync(url);
-        var prices = ParseChartResponse(json, symbol);
+        // Try v8 chart API first (often works without crumb), then fall back to v7 with crumb
+        var strategies = new List<Func<Task<string>>>
+        {
+            () => FetchV8ChartAsync(symbol, period1, period2),
+            () => FetchV7DownloadAsync(symbol, period1, period2)
+        };
 
-        return new StockQuote(symbol, prices);
+        foreach (var strategy in strategies)
+        {
+            try
+            {
+                var json = await strategy();
+                return ParseResponse(json, symbol);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  {symbol}: attempt failed ({ex.Message}), trying next method...");
+            }
+        }
+
+        throw new HttpRequestException(
+            $"All Yahoo Finance methods failed for {symbol}. Consider using --data-source alphavantage or --data-source csv");
     }
 
     public async Task<List<StockQuote>> GetHistoricalDataAsync(
@@ -35,50 +63,123 @@ public class YahooFinanceProvider : IMarketDataProvider
     {
         var quotes = new List<StockQuote>();
 
-        // Fetch sequentially with a delay between requests to avoid rate limiting
         foreach (var symbol in symbols)
         {
             quotes.Add(await GetHistoricalDataAsync(symbol, startDate, endDate));
-            await Task.Delay(500); // 500ms pause between symbols
+            await Task.Delay(1000); // 1s pause between symbols
         }
 
         return quotes;
+    }
+
+    private static async Task<string> FetchV8ChartAsync(string symbol, long period1, long period2)
+    {
+        // Try query2 first (less rate-limited), then query1
+        string[] hosts = { "query2.finance.yahoo.com", "query1.finance.yahoo.com" };
+
+        foreach (var host in hosts)
+        {
+            var url = $"https://{host}/v8/finance/chart/{symbol}?period1={period1}&period2={period2}&interval=1d";
+
+            try
+            {
+                return await FetchWithRetryAsync(url);
+            }
+            catch
+            {
+                // Try next host
+            }
+        }
+
+        throw new HttpRequestException("v8 chart API failed on all hosts.");
+    }
+
+    private static async Task<string> FetchV7DownloadAsync(string symbol, long period1, long period2)
+    {
+        var crumb = await GetCrumbAsync();
+
+        string[] hosts = { "query2.finance.yahoo.com", "query1.finance.yahoo.com" };
+
+        foreach (var host in hosts)
+        {
+            var url = $"https://{host}/v7/finance/download/{symbol}" +
+                      $"?period1={period1}&period2={period2}&interval=1d&events=history&crumb={Uri.EscapeDataString(crumb)}";
+
+            try
+            {
+                return await FetchWithRetryAsync(url);
+            }
+            catch
+            {
+                // Try next host
+            }
+        }
+
+        throw new HttpRequestException("v7 download API failed on all hosts.");
+    }
+
+    private static async Task<string> GetCrumbAsync()
+    {
+        await CrumbLock.WaitAsync();
+        try
+        {
+            if (_crumb != null) return _crumb;
+
+            // Step 1: Visit Yahoo Finance to get cookies
+            var homeResponse = await HttpClient.GetAsync("https://finance.yahoo.com/quote/AAPL/");
+            homeResponse.EnsureSuccessStatusCode();
+
+            // Step 2: Fetch crumb using the cookies
+            var crumbResponse = await HttpClient.GetAsync("https://query2.finance.yahoo.com/v1/test/getcrumb");
+            crumbResponse.EnsureSuccessStatusCode();
+            _crumb = await crumbResponse.Content.ReadAsStringAsync();
+
+            if (string.IsNullOrWhiteSpace(_crumb))
+                throw new InvalidOperationException("Failed to obtain Yahoo Finance crumb.");
+
+            return _crumb;
+        }
+        finally
+        {
+            CrumbLock.Release();
+        }
     }
 
     private static async Task<string> FetchWithRetryAsync(string url)
     {
         for (int attempt = 0; attempt <= MaxRetries; attempt++)
         {
-            try
+            var response = await HttpClient.GetAsync(url);
+
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
             {
-                var response = await HttpClient.GetAsync(url);
+                if (attempt == MaxRetries)
+                    throw new HttpRequestException("Rate limited after retries.");
 
-                if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
-                {
-                    if (attempt == MaxRetries)
-                        throw new HttpRequestException($"Yahoo Finance rate limit exceeded after {MaxRetries + 1} attempts.");
-
-                    var delay = (int)Math.Pow(2, attempt + 1) * 1000; // 2s, 4s, 8s
-                    Console.WriteLine($"  Rate limited, waiting {delay / 1000}s before retry...");
-                    await Task.Delay(delay);
-                    continue;
-                }
-
-                response.EnsureSuccessStatusCode();
-                return await response.Content.ReadAsStringAsync();
-            }
-            catch (HttpRequestException) when (attempt < MaxRetries)
-            {
                 var delay = (int)Math.Pow(2, attempt + 1) * 1000;
-                Console.WriteLine($"  Request failed, retrying in {delay / 1000}s...");
+                Console.WriteLine($"  Rate limited, waiting {delay / 1000}s...");
                 await Task.Delay(delay);
+                continue;
             }
+
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadAsStringAsync();
         }
 
-        throw new HttpRequestException($"Failed to fetch data after {MaxRetries + 1} attempts.");
+        throw new HttpRequestException("Failed after retries.");
     }
 
-    private static List<StockPrice> ParseChartResponse(string json, string symbol)
+    private static StockQuote ParseResponse(string content, string symbol)
+    {
+        // Try JSON (v8 chart API) first, then CSV (v7 download)
+        content = content.Trim();
+        if (content.StartsWith('{'))
+            return ParseChartJson(content, symbol);
+        else
+            return ParseCsvResponse(content, symbol);
+    }
+
+    private static StockQuote ParseChartJson(string json, string symbol)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -92,9 +193,11 @@ public class YahooFinanceProvider : IMarketDataProvider
         }
 
         var result = chart.GetProperty("result")[0];
-        var timestamps = result.GetProperty("timestamp");
-        var quote = result.GetProperty("indicators").GetProperty("quote")[0];
 
+        if (!result.TryGetProperty("timestamp", out var timestamps))
+            throw new InvalidOperationException($"No data returned for {symbol}.");
+
+        var quote = result.GetProperty("indicators").GetProperty("quote")[0];
         var opens = quote.GetProperty("open");
         var highs = quote.GetProperty("high");
         var lows = quote.GetProperty("low");
@@ -105,7 +208,6 @@ public class YahooFinanceProvider : IMarketDataProvider
 
         for (int i = 0; i < timestamps.GetArrayLength(); i++)
         {
-            // Skip entries where any OHLC value is null (happens on some trading days)
             if (opens[i].ValueKind == JsonValueKind.Null ||
                 highs[i].ValueKind == JsonValueKind.Null ||
                 lows[i].ValueKind == JsonValueKind.Null ||
@@ -125,6 +227,30 @@ public class YahooFinanceProvider : IMarketDataProvider
             ));
         }
 
-        return prices.OrderBy(p => p.Date).ToList();
+        return new StockQuote(symbol, prices.OrderBy(p => p.Date).ToList());
+    }
+
+    private static StockQuote ParseCsvResponse(string csv, string symbol)
+    {
+        var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries).Skip(1); // skip header
+        var prices = new List<StockPrice>();
+
+        foreach (var line in lines)
+        {
+            var parts = line.Split(',');
+            if (parts.Length < 6) continue;
+            if (parts.Any(p => p.Trim() == "null")) continue;
+
+            prices.Add(new StockPrice(
+                Date: DateTime.Parse(parts[0]),
+                Open: decimal.Parse(parts[1]),
+                High: decimal.Parse(parts[2]),
+                Low: decimal.Parse(parts[3]),
+                Close: decimal.Parse(parts[4]),
+                Volume: long.Parse(parts[5])
+            ));
+        }
+
+        return new StockQuote(symbol, prices.OrderBy(p => p.Date).ToList());
     }
 }
