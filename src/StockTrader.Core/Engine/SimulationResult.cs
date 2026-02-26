@@ -116,8 +116,12 @@ public class SimulationResult
                 }
             }
 
+            // Show integer quantities without decimals, fractional with 2 decimals
+            var qtyStr = order.Quantity == Math.Floor(order.Quantity)
+                ? $"{order.Quantity,9:F0}"
+                : $"{order.Quantity,9:F2}";
             Console.WriteLine(
-                $"{order.Timestamp:yyyy-MM-dd}  {order.Side,-6} {order.Symbol,-8} {order.Quantity,6} {order.Price,10:F2} {order.TotalValue,12:F2} {pnlStr,10} {reason}");
+                $"{order.Timestamp:yyyy-MM-dd}  {order.Side,-6} {order.Symbol,-8} {qtyStr} {order.Price,10:F2} {order.TotalValue,12:F2} {pnlStr,10} {reason}");
         }
     }
 

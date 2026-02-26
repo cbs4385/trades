@@ -267,6 +267,23 @@ public class TradingEngineTests
         Assert.Equal(expectedStopPrice, stopSell.Price);
     }
 
+    [Fact]
+    public void Engine_SupportsFractionalShares()
+    {
+        // With $100 and stock at $300, should buy fractional shares (0.08333...)
+        var prices = GenerateUptrend(30, 300m); // stock at ~$300
+        var portfolio = new Portfolio(100m);
+        var engine = new TradingEngine(portfolio, new AlwaysBuyOnceStrategy());
+        var quotes = new List<StockQuote> { new("TEST", prices) };
+
+        engine.RunBacktest(quotes);
+
+        var buy = portfolio.OrderHistory.FirstOrDefault(o => o.Side == OrderSide.Buy);
+        Assert.NotNull(buy);
+        Assert.True(buy.Quantity > 0, "Should have bought some shares");
+        Assert.True(buy.Quantity < 1, "Should be fractional (less than 1 share)");
+    }
+
     // Test strategies
     private class AlwaysBuyOnceStrategy : ITradingStrategy
     {

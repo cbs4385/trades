@@ -3,7 +3,7 @@ namespace StockTrader.Core.Models;
 public class Position
 {
     public string Symbol { get; init; } = string.Empty;
-    public int Quantity { get; set; }
+    public decimal Quantity { get; set; }
     public decimal AverageCost { get; set; }
     public decimal CurrentPrice { get; set; }
 

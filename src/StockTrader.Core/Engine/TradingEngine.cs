@@ -196,7 +196,7 @@ public class TradingEngine
 
         if (availableCash <= 0) return;
 
-        var quantity = (int)(availableCash / signal.Price);
+        var quantity = Math.Round(availableCash / signal.Price, 6);
         if (quantity <= 0) return;
 
         var totalCost = quantity * signal.Price + _commissionPerTrade;

@@ -68,7 +68,8 @@ public class Program
                 rsiOversold: config.RsiOversold),
             _ => new SmaCrossoverStrategy(
                 fastPeriod: config.FastPeriod,
-                slowPeriod: config.SlowPeriod)
+                slowPeriod: config.SlowPeriod,
+                macdSellBars: config.MacdSellBars)
         };
 
         var portfolio = new Portfolio(config.InitialCapital);
@@ -142,6 +143,9 @@ public class Program
                 case "--api-key":
                     config.AlphaVantageApiKey = args[++i];
                     break;
+                case "--macd-sell-bars":
+                    config.MacdSellBars = int.Parse(args[++i]);
+                    break;
                 case "--help" or "-h":
                     PrintHelp();
                     Environment.Exit(0);
@@ -166,6 +170,7 @@ public class Program
         Console.WriteLine("  --slow-period <n>            Slow SMA period (default: 30)");
         Console.WriteLine("  --rsi-overbought <n>         RSI overbought threshold (default: 70)");
         Console.WriteLine("  --rsi-oversold <n>           RSI oversold threshold (default: 30)");
+        Console.WriteLine("  --macd-sell-bars <n>         Consecutive MACD bars before sell (default: 3)");
         Console.WriteLine("  --commission <amount>        Commission per trade (default: $0)");
         Console.WriteLine("  --max-position <pct>         Max position size as fraction (default: 0.25)");
         Console.WriteLine("  --stop-loss <pct>            Stop-loss percentage, e.g. 5 for 5% (default: off)");
@@ -194,6 +199,7 @@ public class SimulationConfig
     public int SlowPeriod { get; set; } = 30;
     public decimal RsiOverbought { get; set; } = 70m;
     public decimal RsiOversold { get; set; } = 30m;
+    public int MacdSellBars { get; set; } = 3;
     public decimal Commission { get; set; } = 0m;
     public decimal MaxPositionPercent { get; set; } = 0.25m;
     public decimal StopLossPercent { get; set; } = 0m;

@@ -6,7 +6,7 @@ public enum OrderStatus { Pending, Filled, Cancelled }
 public record Order(
     string Symbol,
     OrderSide Side,
-    int Quantity,
+    decimal Quantity,
     decimal Price,
     DateTime Timestamp,
     OrderStatus Status = OrderStatus.Pending)

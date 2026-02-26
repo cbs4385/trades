@@ -22,6 +22,7 @@ public class SmaCrossoverStrategy : ITradingStrategy
     private readonly int _rsiPeriod;
     private readonly decimal _rsiOverbought;
     private readonly decimal _rsiOversold;
+    private readonly int _macdSellBars;
 
     public string Name => $"SMA Crossover ({_fastPeriod}/{_slowPeriod}) + RSI({_rsiPeriod}) + MACD";
 
@@ -30,13 +31,15 @@ public class SmaCrossoverStrategy : ITradingStrategy
         int slowPeriod = 30,
         int rsiPeriod = 14,
         decimal rsiOverbought = 70m,
-        decimal rsiOversold = 30m)
+        decimal rsiOversold = 30m,
+        int macdSellBars = 1)
     {
         _fastPeriod = fastPeriod;
         _slowPeriod = slowPeriod;
         _rsiPeriod = rsiPeriod;
         _rsiOverbought = rsiOverbought;
         _rsiOversold = rsiOversold;
+        _macdSellBars = macdSellBars;
     }
 
     public List<TradingSignal> Evaluate(StockQuote quote, Portfolio portfolio)
@@ -104,9 +107,20 @@ public class SmaCrossoverStrategy : ITradingStrategy
             if (currentRsi.HasValue && currentRsi.Value > _rsiOverbought)
                 sellReasons.Add($"RSI overbought ({currentRsi.Value:F1})");
 
-            if (currentMacdHist.HasValue && currentMacdHist.Value < 0
-                && macd[prev].Histogram.HasValue && macd[prev].Histogram!.Value >= 0)
-                sellReasons.Add("MACD histogram turned negative");
+            // MACD sell: require histogram to be negative for N consecutive bars
+            if (currentMacdHist.HasValue && currentMacdHist.Value < 0 && _macdSellBars > 0)
+            {
+                int consecutiveNegative = 0;
+                for (int j = i; j >= 0 && j > i - _macdSellBars - 10; j--)
+                {
+                    if (macd[j].Histogram.HasValue && macd[j].Histogram!.Value < 0)
+                        consecutiveNegative++;
+                    else
+                        break;
+                }
+                if (consecutiveNegative >= _macdSellBars)
+                    sellReasons.Add($"MACD histogram negative ({consecutiveNegative} bars)");
+            }
 
             if (sellReasons.Count > 0)
             {
