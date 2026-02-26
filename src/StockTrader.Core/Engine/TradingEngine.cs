@@ -50,24 +50,34 @@ public class TradingEngine
 
         foreach (var date in allDates)
         {
+            // Build today's price lookup for intraday stop simulation
+            var todayPrices = new Dictionary<string, StockPrice>();
+
             // Update current prices and trailing stop high-water marks
             foreach (var quote in quotes)
             {
                 var price = quote.Prices.FirstOrDefault(p => p.Date == date);
-                if (price != null && _portfolio.Positions.TryGetValue(quote.Symbol, out var pos))
+                if (price != null)
                 {
-                    pos.CurrentPrice = price.Close;
+                    todayPrices[quote.Symbol] = price;
 
-                    if (_trailingStopPercent > 0)
+                    if (_portfolio.Positions.TryGetValue(quote.Symbol, out var pos))
                     {
-                        if (!_highWaterMark.TryGetValue(quote.Symbol, out var hwm) || price.Close > hwm)
-                            _highWaterMark[quote.Symbol] = price.Close;
+                        pos.CurrentPrice = price.Close;
+
+                        // Track high-water mark using daily high for trailing stops
+                        if (_trailingStopPercent > 0)
+                        {
+                            if (!_highWaterMark.TryGetValue(quote.Symbol, out var hwm) || price.High > hwm)
+                                _highWaterMark[quote.Symbol] = price.High;
+                        }
                     }
                 }
             }
 
             // Check stop-loss, take-profit, and trailing stop before strategy evaluation
-            CheckRiskManagement(date);
+            // Pass today's price data so stops can use intraday low/high
+            CheckRiskManagement(date, todayPrices);
 
             // Evaluate strategy for each symbol
             foreach (var quote in quotes)
@@ -95,43 +105,68 @@ public class TradingEngine
         return BuildResult(allDates);
     }
 
-    private void CheckRiskManagement(DateTime date)
+    private void CheckRiskManagement(DateTime date, Dictionary<string, StockPrice> todayPrices)
     {
-        var symbolsToSell = new List<(string symbol, string reason)>();
+        // (symbol, reason, executionPrice) - execution price may differ from close
+        // when a stop is triggered intraday at the exact stop level
+        var symbolsToSell = new List<(string symbol, string reason, decimal execPrice)>();
 
         foreach (var (symbol, position) in _portfolio.Positions)
         {
-            var pnlPercent = position.UnrealizedPnLPercent;
+            todayPrices.TryGetValue(symbol, out var todayPrice);
 
-            // Stop-loss: sell if position has dropped beyond threshold
-            if (_stopLossPercent > 0 && pnlPercent <= -_stopLossPercent)
+            // Stop-loss: check if today's LOW breached the stop level
+            if (_stopLossPercent > 0)
             {
-                symbolsToSell.Add((symbol, $"Stop-loss triggered ({pnlPercent:F1}% loss)"));
-                continue;
+                var stopPrice = position.AverageCost * (1m - _stopLossPercent / 100m);
+                var low = todayPrice?.Low ?? position.CurrentPrice;
+
+                if (low <= stopPrice)
+                {
+                    // Execute at the stop price (simulating a stop order fill)
+                    var pnlPercent = (stopPrice - position.AverageCost) / position.AverageCost * 100m;
+                    symbolsToSell.Add((symbol,
+                        $"Stop-loss triggered ({pnlPercent:F1}% loss)",
+                        stopPrice));
+                    continue;
+                }
             }
 
-            // Take-profit: sell if position has gained beyond threshold
-            if (_takeProfitPercent > 0 && pnlPercent >= _takeProfitPercent)
+            // Take-profit: check if today's HIGH reached the target
+            if (_takeProfitPercent > 0)
             {
-                symbolsToSell.Add((symbol, $"Take-profit triggered ({pnlPercent:F1}% gain)"));
-                continue;
+                var targetPrice = position.AverageCost * (1m + _takeProfitPercent / 100m);
+                var high = todayPrice?.High ?? position.CurrentPrice;
+
+                if (high >= targetPrice)
+                {
+                    var pnlPercent = (targetPrice - position.AverageCost) / position.AverageCost * 100m;
+                    symbolsToSell.Add((symbol,
+                        $"Take-profit triggered ({pnlPercent:F1}% gain)",
+                        targetPrice));
+                    continue;
+                }
             }
 
-            // Trailing stop: sell if price has dropped from high-water mark
+            // Trailing stop: check if today's LOW dropped enough from the high-water mark
             if (_trailingStopPercent > 0 && _highWaterMark.TryGetValue(symbol, out var hwm) && hwm > 0)
             {
-                var dropFromPeak = (hwm - position.CurrentPrice) / hwm * 100m;
-                if (dropFromPeak >= _trailingStopPercent)
+                var trailStopPrice = hwm * (1m - _trailingStopPercent / 100m);
+                var low = todayPrice?.Low ?? position.CurrentPrice;
+
+                if (low <= trailStopPrice)
                 {
-                    symbolsToSell.Add((symbol, $"Trailing stop triggered ({dropFromPeak:F1}% drop from peak ${hwm:F2})"));
+                    var dropFromPeak = _trailingStopPercent; // executed at exact stop level
+                    symbolsToSell.Add((symbol,
+                        $"Trailing stop triggered ({dropFromPeak:F1}% drop from peak ${hwm:F2})",
+                        trailStopPrice));
                 }
             }
         }
 
-        foreach (var (symbol, reason) in symbolsToSell)
+        foreach (var (symbol, reason, execPrice) in symbolsToSell)
         {
-            var position = _portfolio.Positions[symbol];
-            var signal = new TradingSignal(symbol, SignalType.Sell, position.CurrentPrice, date, reason);
+            var signal = new TradingSignal(symbol, SignalType.Sell, execPrice, date, reason);
             SignalHistory.Add(signal);
             ExecuteSell(signal);
             _highWaterMark.Remove(symbol);

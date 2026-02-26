@@ -210,6 +210,63 @@ public class TradingEngineTests
         Assert.True(result.ProfitFactor >= 0);
     }
 
+    [Fact]
+    public void Engine_StopLossExecutesAtStopPrice_NotClose()
+    {
+        // Buy at 100, set 5% stop. Day drops to low=90 (way below 95 stop), close=92.
+        // Stop should execute at exactly 95 (the stop level), not at 92 (close) or 90 (low).
+        var prices = new List<StockPrice>();
+        for (int i = 0; i < 30; i++)
+        {
+            decimal close;
+            decimal low;
+            decimal high;
+            if (i < 15)
+            {
+                close = 100m + i * 0.5m; // gentle uptrend to trigger buy
+                low = close - 0.5m;
+                high = close + 0.5m;
+            }
+            else if (i == 20)
+            {
+                // Gap down day: low crashes well below 5% stop
+                close = 92m;
+                low = 90m;
+                high = 93m;
+            }
+            else
+            {
+                close = 107m;
+                low = 106m;
+                high = 108m;
+            }
+
+            prices.Add(new StockPrice(
+                DateTime.Today.AddDays(-30 + i), close - 0.2m, high, low, close, 1_000_000));
+        }
+
+        var portfolio = new Portfolio(10_000m);
+        var engine = new TradingEngine(portfolio, new AlwaysBuyOnceStrategy(), stopLossPercent: 5m);
+        var quotes = new List<StockQuote> { new("TEST", prices) };
+
+        var result = engine.RunBacktest(quotes);
+
+        var stopSell = result.OrderHistory
+            .FirstOrDefault(o => o.Side == OrderSide.Sell
+                && result.SignalHistory.Any(s => s.Symbol == o.Symbol
+                    && s.Timestamp == o.Timestamp
+                    && s.Reason.Contains("Stop-loss")));
+
+        Assert.NotNull(stopSell);
+
+        // Find entry price to compute expected stop
+        var buy = result.OrderHistory.First(o => o.Side == OrderSide.Buy && o.Symbol == "TEST");
+        var expectedStopPrice = buy.Price * 0.95m; // 5% below entry
+
+        // Stop should execute at the stop price, not the close (92) or low (90)
+        Assert.Equal(expectedStopPrice, stopSell.Price);
+    }
+
     // Test strategies
     private class AlwaysBuyOnceStrategy : ITradingStrategy
     {
