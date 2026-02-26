@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "StockTrader.App": {
+      "commandName": "Project",
+      "commandLineArgs": "--stop-loss 5 --trailing-stop 5"
+    }
+  }
+}
