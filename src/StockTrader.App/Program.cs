@@ -202,17 +202,8 @@ public class Program
 
 public class SimulationConfig
 {
-    // Default: 20 liquid stocks across sectors for diversified intraday scanning
-    public List<string> Symbols { get; set; } = new()
-    {
-        "AAPL", "MSFT", "GOOGL", "AMZN", "META",   // Big Tech
-        "NVDA", "AMD", "TSLA",                        // High-beta tech
-        "JPM", "BAC", "GS",                           // Financials
-        "JNJ", "UNH", "PFE",                          // Healthcare
-        "WMT", "KO", "DIS",                           // Consumer
-        "XOM", "CVX",                                  // Energy
-        "CAT"                                          // Industrial
-    };
+    // DIA = SPDR Dow Jones Industrial Average ETF (mirrors the Dow)
+    public List<string> Symbols { get; set; } = new() { "DIA" };
     public DateTime StartDate { get; set; } = DateTime.Now.AddYears(-5);
     public DateTime EndDate { get; set; } = DateTime.Now;
     public decimal InitialCapital { get; set; } = 100m;
