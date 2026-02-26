@@ -284,6 +284,94 @@ public class TradingEngineTests
         Assert.True(buy.Quantity < 1, "Should be fractional (less than 1 share)");
     }
 
+    [Fact]
+    public void Engine_IntradayMode_ClosesAllPositionsDaily()
+    {
+        var prices = GenerateUptrend(50);
+        var portfolio = new Portfolio(10_000m);
+        var strategy = new AlwaysBuyOnceStrategy();
+        var engine = new TradingEngine(portfolio, strategy, intradayMode: true);
+        var quotes = new List<StockQuote> { new("TEST", prices) };
+
+        engine.RunBacktest(quotes);
+
+        // In intraday mode, no positions should remain at end
+        Assert.Empty(portfolio.Positions);
+        // Should have both buy and sell orders
+        Assert.Contains(portfolio.OrderHistory, o => o.Side == OrderSide.Buy);
+        Assert.Contains(portfolio.OrderHistory, o => o.Side == OrderSide.Sell);
+    }
+
+    [Fact]
+    public void Engine_IntradayMode_BuysAtSignalPrice()
+    {
+        // Strategy returns signal with Open price, engine should buy at that price
+        var prices = GenerateUptrend(50);
+        var portfolio = new Portfolio(1_000m);
+        var strategy = new BuyAtOpenStrategy();
+        var engine = new TradingEngine(portfolio, strategy, intradayMode: true, maxPositionPercent: 1.0m);
+        var quotes = new List<StockQuote> { new("TEST", prices) };
+
+        engine.RunBacktest(quotes);
+
+        var buy = portfolio.OrderHistory.FirstOrDefault(o => o.Side == OrderSide.Buy);
+        Assert.NotNull(buy);
+        // The strategy sets price to Open, verify it matches
+        var signalDay = prices.First(p => p.Date == buy.Timestamp);
+        Assert.Equal(signalDay.Open, buy.Price);
+    }
+
+    [Fact]
+    public void Engine_IntradayMode_TracksDailyTrades()
+    {
+        var prices = GenerateUptrend(50);
+        var portfolio = new Portfolio(1_000m);
+        var strategy = new BuyAtOpenStrategy();
+        var engine = new TradingEngine(portfolio, strategy, intradayMode: true, maxPositionPercent: 1.0m);
+        var quotes = new List<StockQuote> { new("TEST", prices) };
+
+        var result = engine.RunBacktest(quotes);
+
+        // DailyTrades should be populated for intraday mode
+        Assert.True(result.DailyTrades.Count > 0);
+        Assert.True(result.IntradayMode);
+    }
+
+    [Fact]
+    public void Engine_IntradayMode_IntradayStopLoss()
+    {
+        // Create days where one day has a crash: open at 106, low at 90
+        var prices = new List<StockPrice>();
+        for (int i = 0; i < 40; i++)
+        {
+            if (i == 25)
+            {
+                // Crash day: open at 106, low at 90, close at 95
+                prices.Add(new StockPrice(
+                    DateTime.Today.AddDays(-40 + i), 106m, 107m, 90m, 95m, 2_000_000));
+            }
+            else
+            {
+                var c = 100m + i * 0.3m;
+                prices.Add(new StockPrice(
+                    DateTime.Today.AddDays(-40 + i), c - 0.1m, c + 0.5m, c - 0.5m, c, 1_000_000));
+            }
+        }
+
+        var portfolio = new Portfolio(1_000m);
+        // Use BuyEveryDayStrategy so there's a position on the crash day
+        var strategy = new BuyEveryDayStrategy();
+        var engine = new TradingEngine(portfolio, strategy,
+            intradayMode: true, maxPositionPercent: 1.0m, stopLossPercent: 2m);
+        var quotes = new List<StockQuote> { new("TEST", prices) };
+
+        var result = engine.RunBacktest(quotes);
+
+        // Should have at least one intraday stop-loss on the crash day
+        Assert.Contains(result.SignalHistory, s =>
+            s.Type == SignalType.Sell && s.Reason.Contains("Intraday stop-loss"));
+    }
+
     // Test strategies
     private class AlwaysBuyOnceStrategy : ITradingStrategy
     {
@@ -302,6 +390,48 @@ public class TradingEngineTests
                 };
             }
             return new List<TradingSignal>();
+        }
+    }
+
+    /// Strategy that buys at Open price once (for intraday testing)
+    private class BuyAtOpenStrategy : ITradingStrategy
+    {
+        public string Name => "BuyAtOpen";
+        private bool _bought;
+
+        public List<TradingSignal> Evaluate(StockQuote quote, Portfolio portfolio)
+        {
+            if (quote.Prices.Count > 15 && !_bought && !portfolio.Positions.ContainsKey(quote.Symbol))
+            {
+                _bought = true;
+                var today = quote.Prices[^1];
+                return new List<TradingSignal>
+                {
+                    new(quote.Symbol, SignalType.Buy, today.Open, today.Date,
+                        "Test intraday buy", Score: 10m)
+                };
+            }
+            return new();
+        }
+    }
+
+    /// Strategy that buys at Open price every day (for intraday stop-loss testing)
+    private class BuyEveryDayStrategy : ITradingStrategy
+    {
+        public string Name => "BuyEveryDay";
+
+        public List<TradingSignal> Evaluate(StockQuote quote, Portfolio portfolio)
+        {
+            if (quote.Prices.Count > 5 && !portfolio.Positions.ContainsKey(quote.Symbol))
+            {
+                var today = quote.Prices[^1];
+                return new List<TradingSignal>
+                {
+                    new(quote.Symbol, SignalType.Buy, today.Open, today.Date,
+                        "Daily buy", Score: 10m)
+                };
+            }
+            return new();
         }
     }
 

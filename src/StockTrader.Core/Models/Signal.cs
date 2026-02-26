@@ -7,4 +7,5 @@ public record TradingSignal(
     SignalType Type,
     decimal Price,
     DateTime Timestamp,
-    string Reason);
+    string Reason,
+    decimal Score = 0m);

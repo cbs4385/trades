@@ -11,10 +11,13 @@ public class TradingEngine
     private readonly decimal _stopLossPercent;
     private readonly decimal _takeProfitPercent;
     private readonly decimal _trailingStopPercent;
+    private readonly bool _intradayMode;
 
     // Track highest price since entry for trailing stops
     private readonly Dictionary<string, decimal> _highWaterMark = new();
 
+    // Track daily P&L for performance log (date -> P&L amount)
+    public List<(DateTime Date, decimal PnL, string Symbol)> DailyTrades { get; } = new();
     public List<TradingSignal> SignalHistory { get; } = new();
     public List<decimal> EquityCurve { get; } = new();
 
@@ -25,7 +28,8 @@ public class TradingEngine
         decimal maxPositionPercent = 0.25m,
         decimal stopLossPercent = 0m,
         decimal takeProfitPercent = 0m,
-        decimal trailingStopPercent = 0m)
+        decimal trailingStopPercent = 0m,
+        bool intradayMode = false)
     {
         _portfolio = portfolio;
         _strategy = strategy;
@@ -34,6 +38,7 @@ public class TradingEngine
         _stopLossPercent = stopLossPercent;
         _takeProfitPercent = takeProfitPercent;
         _trailingStopPercent = trailingStopPercent;
+        _intradayMode = intradayMode;
     }
 
     public SimulationResult RunBacktest(List<StockQuote> quotes)
@@ -50,65 +55,149 @@ public class TradingEngine
 
         foreach (var date in allDates)
         {
-            // Build today's price lookup for intraday stop simulation
+            // Build today's price lookup
             var todayPrices = new Dictionary<string, StockPrice>();
-
-            // Update current prices and trailing stop high-water marks
             foreach (var quote in quotes)
             {
                 var price = quote.Prices.FirstOrDefault(p => p.Date == date);
                 if (price != null)
-                {
                     todayPrices[quote.Symbol] = price;
-
-                    if (_portfolio.Positions.TryGetValue(quote.Symbol, out var pos))
-                    {
-                        pos.CurrentPrice = price.Close;
-
-                        // Track high-water mark using daily high for trailing stops
-                        if (_trailingStopPercent > 0)
-                        {
-                            if (!_highWaterMark.TryGetValue(quote.Symbol, out var hwm) || price.High > hwm)
-                                _highWaterMark[quote.Symbol] = price.High;
-                        }
-                    }
-                }
             }
 
-            // Check stop-loss, take-profit, and trailing stop before strategy evaluation
-            // Pass today's price data so stops can use intraday low/high
-            CheckRiskManagement(date, todayPrices);
-
-            // Evaluate strategy for each symbol
-            foreach (var quote in quotes)
-            {
-                var pricesUpToDate = new StockQuote(
-                    quote.Symbol,
-                    quote.Prices.Where(p => p.Date <= date).ToList());
-
-                if (pricesUpToDate.Prices.Count == 0) continue;
-
-                var signals = _strategy.Evaluate(pricesUpToDate, _portfolio);
-                foreach (var signal in signals)
-                {
-                    SignalHistory.Add(signal);
-                    ExecuteSignal(signal);
-                }
-            }
+            if (_intradayMode)
+                ProcessIntradayBar(date, quotes, todayPrices);
+            else
+                ProcessSwingBar(date, quotes, todayPrices);
 
             EquityCurve.Add(_portfolio.TotalValue);
         }
 
-        // Close all remaining positions at last known prices
-        CloseAllPositions(allDates.Last());
+        // Close all remaining positions at last known prices (swing mode only)
+        if (!_intradayMode)
+            CloseAllPositions(allDates.Last());
 
         return BuildResult(allDates);
     }
 
+    /// Swing trading: hold positions across days, use strategy signals to exit.
+    private void ProcessSwingBar(DateTime date, List<StockQuote> quotes, Dictionary<string, StockPrice> todayPrices)
+    {
+        // Update current prices and trailing stop high-water marks
+        foreach (var (symbol, price) in todayPrices)
+        {
+            if (_portfolio.Positions.TryGetValue(symbol, out var pos))
+            {
+                pos.CurrentPrice = price.Close;
+
+                if (_trailingStopPercent > 0)
+                {
+                    if (!_highWaterMark.TryGetValue(symbol, out var hwm) || price.High > hwm)
+                        _highWaterMark[symbol] = price.High;
+                }
+            }
+        }
+
+        // Check stop-loss, take-profit, and trailing stop
+        CheckRiskManagement(date, todayPrices);
+
+        // Evaluate strategy for each symbol
+        foreach (var quote in quotes)
+        {
+            var pricesUpToDate = new StockQuote(
+                quote.Symbol,
+                quote.Prices.Where(p => p.Date <= date).ToList());
+
+            if (pricesUpToDate.Prices.Count == 0) continue;
+
+            var signals = _strategy.Evaluate(pricesUpToDate, _portfolio);
+            foreach (var signal in signals)
+            {
+                SignalHistory.Add(signal);
+                ExecuteSignal(signal);
+            }
+        }
+    }
+
+    /// Intraday: buy at Open, check intraday stop, sell everything at Close.
+    private void ProcessIntradayBar(DateTime date, List<StockQuote> quotes, Dictionary<string, StockPrice> todayPrices)
+    {
+        // 1. Collect buy candidates from strategy (each scored)
+        var candidates = new List<TradingSignal>();
+        foreach (var quote in quotes)
+        {
+            var pricesUpToDate = new StockQuote(
+                quote.Symbol,
+                quote.Prices.Where(p => p.Date <= date).ToList());
+
+            if (pricesUpToDate.Prices.Count < 2) continue;
+
+            var signals = _strategy.Evaluate(pricesUpToDate, _portfolio);
+            candidates.AddRange(signals.Where(s => s.Type == SignalType.Buy));
+        }
+
+        // 2. Pick the best candidate by score
+        var best = candidates.OrderByDescending(s => s.Score).FirstOrDefault();
+        if (best != null)
+        {
+            SignalHistory.Add(best);
+            ExecuteBuy(best); // buys at Open price (set by strategy)
+        }
+
+        // 3. Check intraday stop-loss: if the day's Low breaches stop, exit at stop price
+        if (_stopLossPercent > 0)
+            CheckIntradayStops(date, todayPrices);
+
+        // 4. Close ALL remaining positions at today's Close (no overnight holding)
+        ForceCloseAtClose(date, todayPrices);
+    }
+
+    private void CheckIntradayStops(DateTime date, Dictionary<string, StockPrice> todayPrices)
+    {
+        var symbolsToSell = new List<(string symbol, string reason, decimal execPrice)>();
+
+        foreach (var (symbol, position) in _portfolio.Positions)
+        {
+            if (!todayPrices.TryGetValue(symbol, out var todayPrice)) continue;
+
+            var stopPrice = position.AverageCost * (1m - _stopLossPercent / 100m);
+            if (todayPrice.Low <= stopPrice)
+            {
+                var pnlPercent = (stopPrice - position.AverageCost) / position.AverageCost * 100m;
+                symbolsToSell.Add((symbol,
+                    $"Intraday stop-loss ({pnlPercent:F1}%)",
+                    stopPrice));
+            }
+        }
+
+        foreach (var (symbol, reason, execPrice) in symbolsToSell)
+        {
+            var pnl = (execPrice - _portfolio.Positions[symbol].AverageCost) * _portfolio.Positions[symbol].Quantity;
+            var signal = new TradingSignal(symbol, SignalType.Sell, execPrice, date, reason);
+            SignalHistory.Add(signal);
+            ExecuteSell(signal);
+            DailyTrades.Add((date, pnl, symbol));
+        }
+    }
+
+    private void ForceCloseAtClose(DateTime date, Dictionary<string, StockPrice> todayPrices)
+    {
+        var symbolsToClose = _portfolio.Positions.Keys.ToList();
+        foreach (var symbol in symbolsToClose)
+        {
+            var position = _portfolio.Positions[symbol];
+            var closePrice = todayPrices.TryGetValue(symbol, out var tp) ? tp.Close : position.CurrentPrice;
+            var pnl = (closePrice - position.AverageCost) * position.Quantity;
+
+            var reason = pnl >= 0 ? $"Close +${pnl:F2}" : $"Close -${Math.Abs(pnl):F2}";
+            var signal = new TradingSignal(symbol, SignalType.Sell, closePrice, date, reason);
+            SignalHistory.Add(signal);
+            ExecuteSell(signal);
+            DailyTrades.Add((date, pnl, symbol));
+        }
+    }
+
     private void CheckRiskManagement(DateTime date, Dictionary<string, StockPrice> todayPrices)
     {
-        // (symbol, reason, executionPrice) - execution price may differ from close
-        // when a stop is triggered intraday at the exact stop level
         var symbolsToSell = new List<(string symbol, string reason, decimal execPrice)>();
 
         foreach (var (symbol, position) in _portfolio.Positions)
@@ -123,7 +212,6 @@ public class TradingEngine
 
                 if (low <= stopPrice)
                 {
-                    // Execute at the stop price (simulating a stop order fill)
                     var pnlPercent = (stopPrice - position.AverageCost) / position.AverageCost * 100m;
                     symbolsToSell.Add((symbol,
                         $"Stop-loss triggered ({pnlPercent:F1}% loss)",
@@ -156,7 +244,7 @@ public class TradingEngine
 
                 if (low <= trailStopPrice)
                 {
-                    var dropFromPeak = _trailingStopPercent; // executed at exact stop level
+                    var dropFromPeak = _trailingStopPercent;
                     symbolsToSell.Add((symbol,
                         $"Trailing stop triggered ({dropFromPeak:F1}% drop from peak ${hwm:F2})",
                         trailStopPrice));
@@ -284,7 +372,9 @@ public class TradingEngine
             AverageLoss = avgLoss,
             EquityCurve = EquityCurve.ToList(),
             OrderHistory = _portfolio.OrderHistory.ToList(),
-            SignalHistory = SignalHistory.ToList()
+            SignalHistory = SignalHistory.ToList(),
+            DailyTrades = DailyTrades.ToList(),
+            IntradayMode = _intradayMode
         };
     }
 
