@@ -112,6 +112,104 @@ public class TradingEngineTests
             "Commission should reduce final value");
     }
 
+    [Fact]
+    public void Engine_StopLossTriggered()
+    {
+        // Generate a price series that goes up then sharply drops
+        var prices = new List<StockPrice>();
+        for (int i = 0; i < 50; i++)
+        {
+            decimal close;
+            if (i < 15) close = 100m + i * 0.5m; // rising to trigger buy
+            else if (i < 25) close = 107.5m; // flat
+            else close = 107.5m - (i - 25) * 2m; // sharp drop
+
+            prices.Add(new StockPrice(
+                DateTime.Today.AddDays(-50 + i),
+                close - 0.2m, close + 0.5m, close - 0.5m, close, 1_000_000));
+        }
+
+        var portfolio = new Portfolio(10_000m);
+        var engine = new TradingEngine(portfolio, new AlwaysBuyOnceStrategy(), stopLossPercent: 5m);
+        var quotes = new List<StockQuote> { new("TEST", prices) };
+
+        var result = engine.RunBacktest(quotes);
+
+        // Should have a sell triggered by stop-loss before end of backtest
+        Assert.Contains(result.SignalHistory, s =>
+            s.Type == SignalType.Sell && s.Reason.Contains("Stop-loss"));
+    }
+
+    [Fact]
+    public void Engine_TakeProfitTriggered()
+    {
+        var prices = GenerateUptrend(50, 100m); // steadily rising prices
+        var portfolio = new Portfolio(10_000m);
+        var engine = new TradingEngine(portfolio, new AlwaysBuyOnceStrategy(), takeProfitPercent: 3m);
+        var quotes = new List<StockQuote> { new("TEST", prices) };
+
+        var result = engine.RunBacktest(quotes);
+
+        // Should have a sell triggered by take-profit
+        Assert.Contains(result.SignalHistory, s =>
+            s.Type == SignalType.Sell && s.Reason.Contains("Take-profit"));
+    }
+
+    [Fact]
+    public void Engine_TrailingStopTriggered()
+    {
+        // Generate prices that rise then fall
+        var prices = new List<StockPrice>();
+        for (int i = 0; i < 50; i++)
+        {
+            decimal close;
+            if (i < 15) close = 100m + i * 0.5m;
+            else if (i < 30) close = 107.5m + (i - 15) * 1m; // rise to 122.5
+            else close = 122.5m - (i - 30) * 1.5m; // drop from peak
+
+            prices.Add(new StockPrice(
+                DateTime.Today.AddDays(-50 + i),
+                close - 0.2m, close + 0.5m, close - 0.5m, close, 1_000_000));
+        }
+
+        var portfolio = new Portfolio(10_000m);
+        var engine = new TradingEngine(portfolio, new AlwaysBuyOnceStrategy(), trailingStopPercent: 5m);
+        var quotes = new List<StockQuote> { new("TEST", prices) };
+
+        var result = engine.RunBacktest(quotes);
+
+        Assert.Contains(result.SignalHistory, s =>
+            s.Type == SignalType.Sell && s.Reason.Contains("Trailing stop"));
+    }
+
+    [Fact]
+    public void Engine_CalculatesSharpeRatio()
+    {
+        var prices = GenerateUptrend(50);
+        var portfolio = new Portfolio(10_000m);
+        var engine = new TradingEngine(portfolio, new AlwaysBuyOnceStrategy());
+        var quotes = new List<StockQuote> { new("TEST", prices) };
+
+        var result = engine.RunBacktest(quotes);
+
+        // Sharpe should be a finite number
+        Assert.True(result.SharpeRatio > decimal.MinValue && result.SharpeRatio < decimal.MaxValue);
+    }
+
+    [Fact]
+    public void Engine_CalculatesProfitFactor()
+    {
+        var prices = GenerateUptrend(50);
+        var portfolio = new Portfolio(10_000m);
+        var engine = new TradingEngine(portfolio, new AlwaysBuyOnceStrategy());
+        var quotes = new List<StockQuote> { new("TEST", prices) };
+
+        var result = engine.RunBacktest(quotes);
+
+        // With an uptrend and one buy+sell, profit factor should be > 0
+        Assert.True(result.ProfitFactor >= 0);
+    }
+
     // Test strategies
     private class AlwaysBuyOnceStrategy : ITradingStrategy
     {

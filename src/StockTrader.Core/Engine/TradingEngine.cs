@@ -8,6 +8,12 @@ public class TradingEngine
     private readonly ITradingStrategy _strategy;
     private readonly decimal _commissionPerTrade;
     private readonly decimal _maxPositionPercent;
+    private readonly decimal _stopLossPercent;
+    private readonly decimal _takeProfitPercent;
+    private readonly decimal _trailingStopPercent;
+
+    // Track highest price since entry for trailing stops
+    private readonly Dictionary<string, decimal> _highWaterMark = new();
 
     public List<TradingSignal> SignalHistory { get; } = new();
     public List<decimal> EquityCurve { get; } = new();
@@ -16,12 +22,18 @@ public class TradingEngine
         Portfolio portfolio,
         ITradingStrategy strategy,
         decimal commissionPerTrade = 0m,
-        decimal maxPositionPercent = 0.25m)
+        decimal maxPositionPercent = 0.25m,
+        decimal stopLossPercent = 0m,
+        decimal takeProfitPercent = 0m,
+        decimal trailingStopPercent = 0m)
     {
         _portfolio = portfolio;
         _strategy = strategy;
         _commissionPerTrade = commissionPerTrade;
         _maxPositionPercent = maxPositionPercent;
+        _stopLossPercent = stopLossPercent;
+        _takeProfitPercent = takeProfitPercent;
+        _trailingStopPercent = trailingStopPercent;
     }
 
     public SimulationResult RunBacktest(List<StockQuote> quotes)
@@ -38,13 +50,24 @@ public class TradingEngine
 
         foreach (var date in allDates)
         {
-            // Update current prices for all positions
+            // Update current prices and trailing stop high-water marks
             foreach (var quote in quotes)
             {
                 var price = quote.Prices.FirstOrDefault(p => p.Date == date);
                 if (price != null && _portfolio.Positions.TryGetValue(quote.Symbol, out var pos))
+                {
                     pos.CurrentPrice = price.Close;
+
+                    if (_trailingStopPercent > 0)
+                    {
+                        if (!_highWaterMark.TryGetValue(quote.Symbol, out var hwm) || price.Close > hwm)
+                            _highWaterMark[quote.Symbol] = price.Close;
+                    }
+                }
             }
+
+            // Check stop-loss, take-profit, and trailing stop before strategy evaluation
+            CheckRiskManagement(date);
 
             // Evaluate strategy for each symbol
             foreach (var quote in quotes)
@@ -70,6 +93,49 @@ public class TradingEngine
         CloseAllPositions(allDates.Last());
 
         return BuildResult(allDates);
+    }
+
+    private void CheckRiskManagement(DateTime date)
+    {
+        var symbolsToSell = new List<(string symbol, string reason)>();
+
+        foreach (var (symbol, position) in _portfolio.Positions)
+        {
+            var pnlPercent = position.UnrealizedPnLPercent;
+
+            // Stop-loss: sell if position has dropped beyond threshold
+            if (_stopLossPercent > 0 && pnlPercent <= -_stopLossPercent)
+            {
+                symbolsToSell.Add((symbol, $"Stop-loss triggered ({pnlPercent:F1}% loss)"));
+                continue;
+            }
+
+            // Take-profit: sell if position has gained beyond threshold
+            if (_takeProfitPercent > 0 && pnlPercent >= _takeProfitPercent)
+            {
+                symbolsToSell.Add((symbol, $"Take-profit triggered ({pnlPercent:F1}% gain)"));
+                continue;
+            }
+
+            // Trailing stop: sell if price has dropped from high-water mark
+            if (_trailingStopPercent > 0 && _highWaterMark.TryGetValue(symbol, out var hwm) && hwm > 0)
+            {
+                var dropFromPeak = (hwm - position.CurrentPrice) / hwm * 100m;
+                if (dropFromPeak >= _trailingStopPercent)
+                {
+                    symbolsToSell.Add((symbol, $"Trailing stop triggered ({dropFromPeak:F1}% drop from peak ${hwm:F2})"));
+                }
+            }
+        }
+
+        foreach (var (symbol, reason) in symbolsToSell)
+        {
+            var position = _portfolio.Positions[symbol];
+            var signal = new TradingSignal(symbol, SignalType.Sell, position.CurrentPrice, date, reason);
+            SignalHistory.Add(signal);
+            ExecuteSell(signal);
+            _highWaterMark.Remove(symbol);
+        }
     }
 
     private void ExecuteSignal(TradingSignal signal)
@@ -121,6 +187,10 @@ public class TradingEngine
             };
         }
 
+        // Initialize high-water mark for trailing stops
+        if (_trailingStopPercent > 0)
+            _highWaterMark[signal.Symbol] = signal.Price;
+
         _portfolio.OrderHistory.Add(new Order(
             signal.Symbol, OrderSide.Buy, quantity, signal.Price,
             signal.Timestamp, OrderStatus.Filled));
@@ -138,6 +208,7 @@ public class TradingEngine
 
         _portfolio.Cash += proceeds;
         _portfolio.Positions.Remove(signal.Symbol);
+        _highWaterMark.Remove(signal.Symbol);
 
         _portfolio.OrderHistory.Add(new Order(
             signal.Symbol, OrderSide.Sell, quantity, signal.Price,
@@ -159,6 +230,7 @@ public class TradingEngine
     private SimulationResult BuildResult(List<DateTime> dates)
     {
         var maxDrawdown = CalculateMaxDrawdown();
+        var (sharpeRatio, profitFactor, avgWin, avgLoss) = CalculateAdvancedMetrics();
 
         return new SimulationResult
         {
@@ -171,6 +243,10 @@ public class TradingEngine
             TotalTrades = _portfolio.TotalTrades,
             WinRate = _portfolio.WinRate,
             MaxDrawdown = maxDrawdown,
+            SharpeRatio = sharpeRatio,
+            ProfitFactor = profitFactor,
+            AverageWin = avgWin,
+            AverageLoss = avgLoss,
             EquityCurve = EquityCurve.ToList(),
             OrderHistory = _portfolio.OrderHistory.ToList(),
             SignalHistory = SignalHistory.ToList()
@@ -192,5 +268,68 @@ public class TradingEngine
         }
 
         return maxDrawdown;
+    }
+
+    private (decimal sharpe, decimal profitFactor, decimal avgWin, decimal avgLoss) CalculateAdvancedMetrics()
+    {
+        // Calculate per-trade P&L for each round trip (buy+sell pair)
+        var tradePnLs = new List<decimal>();
+        var sells = _portfolio.OrderHistory
+            .Where(o => o is { Status: OrderStatus.Filled, Side: OrderSide.Sell })
+            .ToList();
+
+        foreach (var sell in sells)
+        {
+            // Find the most recent buy for this symbol before this sell
+            var matchingBuy = _portfolio.OrderHistory
+                .Where(o => o is { Status: OrderStatus.Filled, Side: OrderSide.Buy }
+                            && o.Symbol == sell.Symbol
+                            && o.Timestamp <= sell.Timestamp)
+                .OrderByDescending(o => o.Timestamp)
+                .FirstOrDefault();
+
+            if (matchingBuy != null)
+            {
+                var pnl = (sell.Price - matchingBuy.Price) * sell.Quantity;
+                tradePnLs.Add(pnl);
+            }
+        }
+
+        if (tradePnLs.Count == 0)
+            return (0, 0, 0, 0);
+
+        var wins = tradePnLs.Where(p => p > 0).ToList();
+        var losses = tradePnLs.Where(p => p < 0).ToList();
+
+        var avgWin = wins.Count > 0 ? wins.Average() : 0;
+        var avgLoss = losses.Count > 0 ? losses.Average() : 0;
+
+        // Profit factor = gross wins / gross losses
+        var grossWins = wins.Sum();
+        var grossLosses = Math.Abs(losses.Sum());
+        var profitFactor = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? decimal.MaxValue : 0;
+
+        // Sharpe ratio (annualized, using daily equity curve returns)
+        decimal sharpe = 0;
+        if (EquityCurve.Count > 1)
+        {
+            var dailyReturns = new List<double>();
+            for (int i = 1; i < EquityCurve.Count; i++)
+            {
+                if (EquityCurve[i - 1] != 0)
+                    dailyReturns.Add((double)(EquityCurve[i] / EquityCurve[i - 1] - 1m));
+            }
+
+            if (dailyReturns.Count > 1)
+            {
+                var avgReturn = dailyReturns.Average();
+                var stdDev = Math.Sqrt(dailyReturns.Sum(r => (r - avgReturn) * (r - avgReturn)) / (dailyReturns.Count - 1));
+
+                if (stdDev > 0)
+                    sharpe = (decimal)(avgReturn / stdDev * Math.Sqrt(252)); // annualized
+            }
+        }
+
+        return (sharpe, profitFactor, avgWin, avgLoss);
     }
 }

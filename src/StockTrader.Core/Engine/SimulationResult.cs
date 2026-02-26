@@ -13,6 +13,10 @@ public class SimulationResult
     public int TotalTrades { get; init; }
     public decimal WinRate { get; init; }
     public decimal MaxDrawdown { get; init; }
+    public decimal SharpeRatio { get; init; }
+    public decimal ProfitFactor { get; init; }
+    public decimal AverageWin { get; init; }
+    public decimal AverageLoss { get; init; }
     public List<decimal> EquityCurve { get; init; } = new();
     public List<Order> OrderHistory { get; init; } = new();
     public List<TradingSignal> SignalHistory { get; init; } = new();
@@ -31,20 +35,29 @@ public class SimulationResult
     public void PrintSummary()
     {
         Console.WriteLine();
-        Console.WriteLine("╔══════════════════════════════════════════════════════╗");
-        Console.WriteLine("║           BACKTEST SIMULATION RESULTS               ║");
-        Console.WriteLine("╠══════════════════════════════════════════════════════╣");
-        Console.WriteLine($"║  Strategy:        {StrategyName,-34} ║");
-        Console.WriteLine($"║  Period:          {StartDate:yyyy-MM-dd} to {EndDate:yyyy-MM-dd}      ║");
-        Console.WriteLine($"║  Initial Capital: {InitialCapital,14:C}                  ║");
-        Console.WriteLine($"║  Final Value:     {FinalValue,14:C}                  ║");
-        Console.WriteLine("╠══════════════════════════════════════════════════════╣");
-        Console.WriteLine($"║  Total Return:      {TotalReturn,10:F2}%                    ║");
-        Console.WriteLine($"║  Annualized Return: {AnnualizedReturn,10:F2}%                    ║");
-        Console.WriteLine($"║  Max Drawdown:      {MaxDrawdown,10:F2}%                    ║");
-        Console.WriteLine($"║  Total Trades:      {TotalTrades,10}                     ║");
-        Console.WriteLine($"║  Win Rate:          {WinRate,10:F1}%                    ║");
-        Console.WriteLine("╚══════════════════════════════════════════════════════╝");
+        Console.WriteLine("╔══════════════════════════════════════════════════════════╗");
+        Console.WriteLine("║             BACKTEST SIMULATION RESULTS                 ║");
+        Console.WriteLine("╠══════════════════════════════════════════════════════════╣");
+        Console.WriteLine($"║  Strategy:          {StrategyName,-36}  ║");
+        Console.WriteLine($"║  Period:            {StartDate:yyyy-MM-dd} to {EndDate:yyyy-MM-dd}          ║");
+        Console.WriteLine($"║  Initial Capital:   {InitialCapital,14:C}                    ║");
+        Console.WriteLine($"║  Final Value:       {FinalValue,14:C}                    ║");
+        Console.WriteLine("╠══════════════════════════════════════════════════════════╣");
+        Console.WriteLine("║  RETURNS                                               ║");
+        Console.WriteLine($"║    Total Return:      {TotalReturn,10:F2}%                      ║");
+        Console.WriteLine($"║    Annualized Return: {AnnualizedReturn,10:F2}%                      ║");
+        Console.WriteLine("╠══════════════════════════════════════════════════════════╣");
+        Console.WriteLine("║  RISK                                                  ║");
+        Console.WriteLine($"║    Max Drawdown:      {MaxDrawdown,10:F2}%                      ║");
+        Console.WriteLine($"║    Sharpe Ratio:      {SharpeRatio,10:F2}                       ║");
+        Console.WriteLine("╠══════════════════════════════════════════════════════════╣");
+        Console.WriteLine("║  TRADES                                                ║");
+        Console.WriteLine($"║    Total Trades:      {TotalTrades,10}                       ║");
+        Console.WriteLine($"║    Win Rate:          {WinRate,10:F1}%                      ║");
+        Console.WriteLine($"║    Profit Factor:     {ProfitFactor,10:F2}                       ║");
+        Console.WriteLine($"║    Avg Win:           {AverageWin,10:C}                    ║");
+        Console.WriteLine($"║    Avg Loss:          {AverageLoss,10:C}                    ║");
+        Console.WriteLine("╚══════════════════════════════════════════════════════════╝");
     }
 
     public void PrintTradeLog()

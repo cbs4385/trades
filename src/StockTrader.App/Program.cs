@@ -39,6 +39,9 @@ public class Program
         Console.WriteLine($"Period:      {config.StartDate:yyyy-MM-dd} to {config.EndDate:yyyy-MM-dd}");
         Console.WriteLine($"Capital:     {config.InitialCapital:C}");
         Console.WriteLine($"Commission:  {config.Commission:C} per trade");
+        if (config.StopLossPercent > 0) Console.WriteLine($"Stop Loss:   {config.StopLossPercent}%");
+        if (config.TakeProfitPercent > 0) Console.WriteLine($"Take Profit: {config.TakeProfitPercent}%");
+        if (config.TrailingStopPercent > 0) Console.WriteLine($"Trail Stop:  {config.TrailingStopPercent}%");
         Console.WriteLine();
         IMarketDataProvider dataProvider = config.DataSource switch
         {
@@ -72,7 +75,10 @@ public class Program
         var engine = new TradingEngine(
             portfolio, strategy,
             commissionPerTrade: config.Commission,
-            maxPositionPercent: config.MaxPositionPercent);
+            maxPositionPercent: config.MaxPositionPercent,
+            stopLossPercent: config.StopLossPercent,
+            takeProfitPercent: config.TakeProfitPercent,
+            trailingStopPercent: config.TrailingStopPercent);
 
         return engine.RunBacktest(quotes);
     }
@@ -118,6 +124,15 @@ public class Program
                 case "--max-position":
                     config.MaxPositionPercent = decimal.Parse(args[++i]);
                     break;
+                case "--stop-loss":
+                    config.StopLossPercent = decimal.Parse(args[++i]);
+                    break;
+                case "--take-profit":
+                    config.TakeProfitPercent = decimal.Parse(args[++i]);
+                    break;
+                case "--trailing-stop":
+                    config.TrailingStopPercent = decimal.Parse(args[++i]);
+                    break;
                 case "--data-source":
                     config.DataSource = args[++i].ToLower();
                     break;
@@ -153,6 +168,9 @@ public class Program
         Console.WriteLine("  --rsi-oversold <n>           RSI oversold threshold (default: 30)");
         Console.WriteLine("  --commission <amount>        Commission per trade (default: $0)");
         Console.WriteLine("  --max-position <pct>         Max position size as fraction (default: 0.25)");
+        Console.WriteLine("  --stop-loss <pct>            Stop-loss percentage, e.g. 5 for 5% (default: off)");
+        Console.WriteLine("  --take-profit <pct>          Take-profit percentage, e.g. 15 for 15% (default: off)");
+        Console.WriteLine("  --trailing-stop <pct>        Trailing stop percentage from peak (default: off)");
         Console.WriteLine("  --data-source <source>       Data source: yahoo, alphavantage, csv (default: yahoo)");
         Console.WriteLine("  --api-key <key>              Alpha Vantage API key (free at alphavantage.co)");
         Console.WriteLine("  --csv-path <path>            Path to CSV data directory");
@@ -178,6 +196,9 @@ public class SimulationConfig
     public decimal RsiOversold { get; set; } = 30m;
     public decimal Commission { get; set; } = 0m;
     public decimal MaxPositionPercent { get; set; } = 0.25m;
+    public decimal StopLossPercent { get; set; } = 0m;
+    public decimal TakeProfitPercent { get; set; } = 0m;
+    public decimal TrailingStopPercent { get; set; } = 0m;
     public string DataSource { get; set; } = "yahoo";
     public string CsvDataPath { get; set; } = "./data";
     public string AlphaVantageApiKey { get; set; } = string.Empty;
